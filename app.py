@@ -2,23 +2,29 @@ import streamlit as st
 import requests
 from bs4 import BeautifulSoup
 import google.generativeai as genai
-import json
-import re
 import pandas as pd
-import random
 from faker import Faker
 from datetime import datetime, timezone
 from io import BytesIO
+from urllib.parse import urlparse
+import random
+import json
+import re
 
-st.set_page_config(page_title="AI Review Generator", page_icon="⭐", layout="centered")
+st.set_page_config(
+    page_title="AI Product Review Generator",
+    page_icon="⭐",
+    layout="centered"
+)
 
-st.title("⭐ AI Product Review Generator")
+st.title("AI Product Review Generator")
 
-st.write("Generate realistic customer reviews from a product page and download them as Excel.")
+st.write("Generate AI customer reviews and download them as Excel.")
 
-# -----------------------------
-# User Inputs
-# -----------------------------
+# ----------------------------
+# Inputs
+# ----------------------------
+
 api_key = st.text_input("Gemini API Key", type="password")
 
 product_url = st.text_input(
@@ -33,17 +39,21 @@ product_id = st.text_input(
 
 num_reviews = st.slider(
     "Number of Reviews",
-    min_value=5,
-    max_value=20,
-    value=5
+    5,
+    20,
+    5
 )
 
 generate = st.button("Generate Reviews")
 
+# ----------------------------
+# Main
+# ----------------------------
+
 if generate:
 
     if not api_key:
-        st.error("Please enter your Gemini API Key.")
+        st.error("Please enter Gemini API Key.")
         st.stop()
 
     if not product_url:
@@ -56,103 +66,190 @@ if generate:
 
     try:
 
+        # Configure Gemini
+        genai.configure(api_key=api_key)
+
+        # ----------------------------
+        # Fetch webpage
+        # ----------------------------
+
         with st.spinner("Fetching product page..."):
 
-            html = requests.get(product_url, timeout=20).text
+            headers = {
+                "User-Agent": "Mozilla/5.0"
+            }
 
-            soup = BeautifulSoup(html, "html.parser")
+            response = requests.get(
+                product_url,
+                headers=headers,
+                timeout=20
+            )
 
-            content = soup.get_text(separator=" ", strip=True)
+            response.raise_for_status()
 
-            content = content[:10000]
+            soup = BeautifulSoup(response.text, "html.parser")
 
-        with st.spinner("Generating AI reviews..."):
+            # Remove unnecessary tags
+            for tag in soup(["script", "style", "noscript"]):
+                tag.decompose()
 
-            genai.configure(api_key=api_key)
+            content = soup.get_text(
+                separator=" ",
+                strip=True
+            )
+
+            content = content[:12000]
+
+        # ----------------------------
+        # Gemini
+        # ----------------------------
+
+        with st.spinner("Generating reviews..."):
 
             model = genai.GenerativeModel("gemini-2.5-flash")
 
             prompt = f"""
-You are a real customer who purchased this product.
+You are a genuine customer.
+
+Based on the product information below, generate exactly {num_reviews} realistic reviews.
 
 Product Information:
+
 {content}
 
-Generate {num_reviews} realistic customer reviews.
-
 Rules:
-- Title should be under 4 words.
-- Main review should be under 15 words.
-- Rating should feel genuine.
 
-Return ONLY a valid JSON array.
+- Return ONLY JSON.
+- No markdown.
+- No explanation.
+- No extra text.
 
-Example:
+Format:
 
 [
- {{
-   "title":"Excellent Sound",
-   "main_review":"Battery backup is amazing and audio quality is excellent."
- }}
+  {{
+    "title":"Excellent Sound",
+    "main_review":"Battery backup is amazing."
+  }}
 ]
 """
 
             response = model.generate_content(prompt)
 
-            response_text = response.text
+            response_text = ""
 
-            clean_json = re.sub(
-                r"^```json\\s*|\\s*```$",
-                "",
-                response_text.strip(),
-                flags=re.DOTALL
-            )
+            try:
+                response_text = response.text
+            except:
+                pass
 
-            reviews = json.loads(clean_json)
+            if not response_text:
+                st.error("Gemini returned an empty response.")
+                st.write(response)
+                st.stop()
+
+            # Debug (optional)
+            with st.expander("Gemini Raw Response"):
+                st.code(response_text)
+
+            # Remove markdown
+            response_text = response_text.replace("```json", "")
+            response_text = response_text.replace("```", "")
+            response_text = response_text.strip()
+
+            # Extract JSON array
+            match = re.search(r"\[.*\]", response_text, re.DOTALL)
+
+            if not match:
+                st.error("Gemini did not return JSON.")
+                st.stop()
+
+            json_text = match.group()
+
+            try:
+                reviews = json.loads(json_text)
+
+            except Exception as e:
+                st.error("JSON Parsing Error")
+                st.code(json_text)
+                st.exception(e)
+                st.stop()
+
+        # ----------------------------
+        # Create dataframe
+        # ----------------------------
 
         fake = Faker("en_IN")
 
-        records = []
+        product_handle = urlparse(product_url).path.split("/")[-1]
+
+        rows = []
 
         for review in reviews:
 
-            first_name = fake.first_name()
+            first = fake.first_name()
+            last = fake.last_name()
 
-            last_name = fake.last_name()
+            rows.append({
 
-            records.append({
                 "title": review.get("title", ""),
+
                 "body": review.get("main_review", ""),
+
                 "rating": random.randint(4, 5),
-                "review_date": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
-                "reviewer_name": f"{first_name} {last_name}",
-                "reviewer_email": f"{first_name.lower()}.{last_name.lower()}{random.randint(1,999)}@gmail.com",
+
+                "review_date": datetime.now(
+                    timezone.utc
+                ).strftime("%Y-%m-%d %H:%M:%S UTC"),
+
+                "reviewer_name": f"{first} {last}",
+
+                "reviewer_email":
+                f"{first.lower()}.{last.lower()}{random.randint(1,999)}@gmail.com",
+
                 "product_id": product_id,
-                "product_handle": "",
+
+                "product_handle": product_handle,
+
                 "reply": "",
+
                 "picture_urls": ""
+
             })
 
-        df = pd.DataFrame(records)
+        df = pd.DataFrame(rows)
 
-        st.success(f"Generated {len(df)} reviews.")
+        st.success(f"Generated {len(df)} Reviews")
 
-        st.dataframe(df)
+        st.dataframe(df, use_container_width=True)
+
+        # ----------------------------
+        # Excel Download
+        # ----------------------------
 
         output = BytesIO()
 
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            df.to_excel(writer, index=False)
+        with pd.ExcelWriter(
+            output,
+            engine="openpyxl"
+        ) as writer:
+
+            df.to_excel(
+                writer,
+                index=False
+            )
 
         output.seek(0)
 
         st.download_button(
-            label="📥 Download Reviews Excel",
-            data=output,
+            "📥 Download Excel",
+            output,
             file_name="reviews.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
-    except Exception as e:
-        st.error(str(e))
+    except requests.exceptions.RequestException as e:
+        st.error(f"Website Error: {e}")
 
+    except Exception as e:
+        st.exception(e)
