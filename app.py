@@ -200,7 +200,7 @@ Format:
 
                 "review_date": datetime.now(
                     timezone.utc
-                ).strftime("%Y-%m-%d %H:%M:%S UTC"),
+                ).strftime("%m-%d-%Y %H:%M:%S UTC"),
 
                 "reviewer_name": f"{first} {last}",
 
